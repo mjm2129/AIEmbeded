@@ -1,19 +1,17 @@
 #include <opencv2/opencv.hpp>
-#include <wiringPi.h>
-#include <tensorflow/lite/interpreter.h>
-#include <tensorflow/lite/kernels/register.h>
-#include <tensorflow/lite/model.h>
+#include <opencv2/core.hpp>
 #include <iostream>
+#include <wiringPi.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <cstdio>
 #include <vector>
-#include <algorithm>
-#include <memory>
-#include "headers/edgetpu_c.h"
-#include <unistd.h> 
+#include <fstream>
+#include "tensorflow/lite/interpreter.h"
+#include "tensorflow/lite/kernels/register.h"
+#include "tensorflow/lite/model.h"
+#include "tensorflow/lite/optional_debug_tools.h"
 
-using namespace cv;
-using namespace std;
-
-// 7세그먼트 핀 정의
 #define PA 2
 #define PB 4
 #define PC 1
@@ -22,147 +20,149 @@ using namespace std;
 #define PF 8
 #define PG 9
 #define PDP 0
-
+// for anode display
 char nums[10] = {0xc0, 0xf9, 0xa4, 0xb0, 0x99, 0x92, 0x82, 0xf8, 0x80, 0x90};
+// WPi pin numbers
 char pins[8] = {PA, PB, PC, PD, PE, PF, PG, PDP};
 
-void clear_pin() {
-    for (int i = 0; i < 8; i++) {
-        digitalWrite(pins[i], 1);
-    }
+void clear_pin (){
+    int i;
+    for (i = 0; i < 8; i++)
+      digitalWrite(pins[i], 1);
 }
 
-void set_pin(int n) {
-    for (int i = 0; i < 8; i++) {
-        digitalWrite(pins[i], (nums[n] >> i) & 0x1);
-    }
+void set_pin (int n){
+    int i;
+    for (i = 0; i < 8; i++)
+      digitalWrite(pins[i], (nums[n] >> i) & 0x1);
 }
 
-void init_pin() {
-    for (int i = 0; i < 8; i++) {
-        pinMode(pins[i], OUTPUT);
-    }
+
+void init_pin (){
+    int i;
+    for (i = 0; i < 8; i++)
+      pinMode(pins[i], OUTPUT);
 }
 
-void preprocessImage(const Mat& src, float* input_tensor) {
-    Mat gray, resized;
-    cvtColor(src, gray, COLOR_BGR2GRAY);
-    resize(gray, resized, Size(28, 28));
+using namespace std;
+using namespace cv;
 
-    for (int i = 0; i < 28; ++i) {
-        for (int j = 0; j < 28; ++j) {
-            input_tensor[i * 28 + j] = resized.at<uchar>(i, j) / 255.0f;
-        }
-    }
+#define MNIST_INPUT "../mnist_dataset/mnist_images"
+#define MNIST_LABEL "../mnist_dataset//mnist_labels"
+
+#define TFLITE_MINIMAL_CHECK(x)                              \
+  if (!(x)) {                                                \
+    fprintf(stderr, "Error at %s:%d\n", __FILE__, __LINE__); \
+    exit(1);                                                 \
+  }
+
+int ReverseInt(int i)
+{
+	unsigned char ch1, ch2, ch3, ch4;
+	ch1 = i & 255;
+	ch2 = (i >> 8) & 255;
+	ch3 = (i >> 16) & 255;
+	ch4 = (i >> 24) & 255;
+	return((int)ch1 << 24) + ((int)ch2 << 16) + ((int)ch3 << 8) + ch4;
 }
+
+
+
+
+
 
 int main(int argc, char* argv[]) {
-    if (argc != 2) {
-        cerr << "Usage: " << argv[0] << " <tflite model>" << endl;
-        return 1;
+  if (argc != 2) {
+    fprintf(stderr, "minimal <tflite model>\n");
+    return 1;
+  }
+  const char* filename = argv[1];
+
+  // Load mnist input images
+  vector<vector<float>> input_vector;
+  read_Mnist(MNIST_INPUT, input_vector);
+  std::cout << "Input MNIST Image" << "\n";
+  for(int i=0; i<28; ++i){
+    for(int j=0; j<28; ++j){
+      printf("%3d ", (int)input_vector[i][j]);
+    }
+    printf("\n");
+  }
+  
+  std::unique_ptr<tflite::FlatBufferModel> model = tflite::FlatBufferModel::BuildFromFile(filename);
+  TFLITE_MINIMAL_CHECK(model != nullptr);
+
+  tflite::ops::builtin::BuiltinOpResolver resolver;
+  tflite::InterpreterBuilder builder(*model, resolver);
+  std::unique_ptr<tflite::Interpreter> interpreter;
+  builder(&interpreter);
+  TFLITE_MINIMAL_CHECK(interpreter != nullptr);
+
+  // Allocate tensor buffers.
+  TFLITE_MINIMAL_CHECK(interpreter->AllocateTensors() == kTfLiteOk);
+  tflite::PrintInterpreterState(interpreter.get());
+  auto input_tensor = interpreter->typed_input_tensor<float>(0);
+  for(int i=0; i<28; ++i) // image rows
+    for(int j=0; j<28; ++j) // image cols
+      input_tensor[i * 28 + j] = input_vector[i][j] / 255.0;
+
+
+
+  VideoCapture cap(0); // Open default camera (0)
+  if (!cap.isOpened()) {
+    cerr << "Error: Could not open camera.\n";
+    return -1;
+  }
+
+  cout << "Press 'q' to quit.\n";
+
+
+while (true) {
+    Mat frame;
+    cap >> frame; // Capture a frame
+    if (frame.empty()) {
+      cerr << "Error: Could not capture frame.\n";
+      break;
     }
 
-    const char* model_filename = argv[1];
-    if (wiringPiSetup() == -1) {
-        cerr << "Error: WiringPi setup failed." << endl;
-        return 1;
+    // Convert to grayscale
+    Mat gray;
+    cvtColor(frame, gray, COLOR_BGR2GRAY);
+
+    // Resize to 28x28 (MNIST input size)
+    Mat resized;
+    resize(gray, resized, Size(28, 28));
+
+    // Normalize to 0-1 range
+    Mat normalized;
+    resized.convertTo(normalized, CV_32F, 1.0 / 255);
+
+    // Copy normalized data to input tensor
+    memcpy(input_tensor, normalized.data, 28 * 28 * sizeof(float));
+
+    // Run inference
+    TFLITE_MINIMAL_CHECK(interpreter->Invoke() == kTfLiteOk);
+
+    // Read output buffer
+    auto output_tensor = interpreter->typed_output_tensor<float>(0);
+
+    // Find the predicted digit
+    int predicted_digit = max_element(output_tensor, output_tensor + 10) - output_tensor;
+    cout << "Predicted digit: " << predicted_digit << endl;
+
+    // Display the frame with prediction
+    putText(frame, "Predicted: " + to_string(predicted_digit), Point(10, 30), 
+            FONT_HERSHEY_SIMPLEX, 1, Scalar(0, 255, 0), 2);
+    imshow("Digit Recognition", frame);
+
+    // Quit on 'q' key press
+    if (waitKey(1) == 'q') {
+      break;
     }
-    init_pin();
+  }
 
-    unique_ptr<tflite::FlatBufferModel> model = tflite::FlatBufferModel::BuildFromFile(model_filename);
-    if (!model) {
-        cerr << "Failed to load model." << endl;
-        return -1;
-    }
+  cap.release();
+  destroyAllWindows();
 
-    tflite::ops::builtin::BuiltinOpResolver resolver;
-    tflite::InterpreterBuilder builder(*model, resolver);
-    unique_ptr<tflite::Interpreter> interpreter;
-    builder(&interpreter);
-    if (!interpreter) {
-        cerr << "Failed to create interpreter." << endl;
-        return -1;
-    }
-
-    size_t num_devices;
-    unique_ptr<edgetpu_device, decltype(&edgetpu_free_devices)> devices(
-        edgetpu_list_devices(&num_devices), &edgetpu_free_devices);
-
-    assert(num_devices > 0);
-    const auto& device = devices.get()[0];
-    auto* delegate = edgetpu_create_delegate(device.type, device.path, nullptr, 0);
-    interpreter->ModifyGraphWithDelegate(delegate);
-    interpreter->AllocateTensors();
-
-    VideoCapture cap(0);
-    cap.set(CAP_PROP_FRAME_WIDTH, 320);
-    cap.set(CAP_PROP_FRAME_HEIGHT, 240);
-
-    if (!cap.isOpened()) {
-    cerr << "Error: Could not open camera" << endl; 
-    }
-
-    while (true) {
-        Mat frame;
-        cap >> frame;
-        
-        // 프레임이 비었는지 확인
-        if (frame.empty()) {
-            cerr << "Error: Captured empty frame" << endl;
-            continue;
-        }
-
-        int frame_width = frame.cols;
-        int frame_height = frame.rows;
-
-        int roi_x = 60;
-        int roi_y = 60;
-        int roi_width = min(200, frame_width - roi_x);
-        int roi_height = min(200, frame_height - roi_y);
-
-        if (roi_width <= 0 || roi_height <= 0) {
-            cerr << "Error: ROI size is invalid for current frame size." << endl;
-            break;
-        }
-
-        Rect roi(roi_x, roi_y, roi_width, roi_height);
-        Mat digit = frame(roi);
-
-        // 전처리 및 모델 입력 텐서 채우기
-        auto input_tensor = interpreter->typed_input_tensor<float>(0);
-        preprocessImage(digit, input_tensor);
-
-        // 추론 실행
-        interpreter->Invoke();
-
-        // 출력 결과에서 예측된 숫자 추출
-        auto output_tensor = interpreter->typed_output_tensor<float>(0);
-        int predicted_label = max_element(output_tensor, output_tensor + 10) - output_tensor;
-
-        // 인식된 숫자를 7세그먼트 디스플레이에 출력
-        clear_pin();
-        set_pin(predicted_label);
-
-        // 인식된 숫자 및 이미지 출력
-        cout << "Predicted Number: " << predicted_label << endl;
-
-        // ROI 박스 및 예측된 숫자 텍스트 표시
-        rectangle(frame, roi, Scalar(0, 255, 0), 2);
-        putText(frame, "Predicted: " + to_string(predicted_label), Point(roi_x, roi_y - 10), 
-                FONT_HERSHEY_SIMPLEX, 0.6, Scalar(0, 255, 0), 2);
-
-        imshow("Camera Feed", frame);
-        imshow("ROI - Digit", digit);
-
-        // 500ms 대기 (0.5초 지연)
-        usleep(500000);
-
-        // 'q' 키로 종료
-        if (waitKey(1) == 'q') break;
-    }
-
-    cap.release();
-    edgetpu_free_delegate(delegate);
-    destroyAllWindows();
-    return 0;
+  return 0;
 }
